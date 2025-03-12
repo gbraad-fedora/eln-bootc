@@ -1,0 +1,114 @@
+name: build containers - fedora-eln-bootc
+run-name: Build containers - fedora-eln-bootc
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-container-fedora-arm64:
+    name: build-container-fedora-arm64
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04-arm
+
+    steps:
+      - name: Remove unwanted stuff
+        uses: gbraad-actions/remove-unwanted@v1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - uses: actions/checkout@v4
+      
+      - name: Build
+        run: |
+          sudo podman build --security-opt=label=disable --cap-add=all --device /dev/fuse \
+            -t localhost/eln-bootc:arm64 -f containers/Containerfile .
+
+      - name: Save
+        run: |
+          sudo podman save localhost/eln-bootc:arm64 --format=oci-dir -o oci-arm64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oci-arm64
+          path: oci-arm64/
+
+
+  build-container-fedora-amd64:
+    name: build-container-fedora-amd64
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+
+    steps:
+      - name: Remove unwanted stuff
+        uses: gbraad-actions/remove-unwanted@v1
+
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          sudo podman build --security-opt=label=disable --cap-add=all --device /dev/fuse \
+            -t localhost/eln-bootc:amd64 -f containers/Containerfile .
+
+      - name: Save
+        run: sudo podman save localhost/eln-bootc:amd64 --format=oci-dir -o oci-amd64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: oci-amd64
+          path: oci-amd64/
+
+
+  push-manifest:
+    name: build-container-fedora
+    needs: 
+      - build-container-fedora-arm64
+      - build-container-fedora-amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: oci-arm64
+          path: oci-arm64
+      - name: Download amd64
+        uses: actions/download-artifact@v4
+        with:
+          name: oci-amd64
+          path: oci-amd64
+
+      - name: Set release tag
+        id: get-tag
+        run: |
+          echo "TAG=$(date +'%y%m%d')" >> $GITHUB_OUTPUT
+
+      - name: Create manifest
+        run: |
+          podman manifest create eln-bootc-manifest
+
+      - name: Add arm64 to manifest
+        run: |
+          podman manifest add eln-bootc-manifest oci:$(pwd)/oci-arm64
+      - name: Add amd64 to manifest
+        run: |
+          podman manifest add eln-bootc-manifest oci:$(pwd)/oci-amd64
+
+      - name: Login to ghcr.io
+        run: |
+          podman login ghcr.io -u ${{ github.actor }} \
+            -p ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push container to registry
+        run: |
+          podman manifest push eln-bootc-manifest docker://ghcr.io/gbraad-fedora/eln-bootc:latest
+          podman manifest push eln-bootc-manifest docker://ghcr.io/gbraad-fedora/eln-bootc:${{ steps.get-tag.outputs.TAG }}

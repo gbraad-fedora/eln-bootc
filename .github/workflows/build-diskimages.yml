@@ -1,0 +1,97 @@
+name: Build qcow2 disk image
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 */2 * *"
+
+env:
+    IMAGE_NAME: ghcr.io/gbraad-fedora/eln-bootc:latest
+    ROOTFS: xfs
+    ARCH: amd64
+    BIB_IMAGE: quay.io/centos-bootc/bootc-image-builder:latest
+
+jobs:
+  build:
+    name: Build qcow2 image
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+
+    steps:
+    - name: Remove unwanted stuff
+      uses: gbraad-devenv/remove-unwanted@v1
+
+    - uses: actions/checkout@v4
+
+    - name: Workaround podman issues in GH actions
+      run: |
+        # see https://github.com/osbuild/bootc-image-builder/issues/446
+        sudo rm -rf /var/lib/containers/storage
+        sudo mkdir -p /etc/containers
+        echo -e "[storage]\ndriver = \"overlay\"\nrunroot = \"/run/containers/storage\"\ngraphroot = \"/var/lib/containers/storage\"" | sudo tee /etc/containers/storage.conf
+
+    - name: Workarounds for GH runner diskspace
+      run: |
+        # use custom basetemp here because /var/tmp is on a smaller disk
+        # than /mnt
+        sudo mkdir -p /mnt/var/tmp/bib-tests
+        # on GH runners /mnt has 70G free space, use that for our container
+        # storage
+        sudo mkdir -p /mnt/var/lib/containers
+        sudo mount -o bind /mnt/var/lib/containers /var/lib/containers
+        sudo mkdir /var/lib/containers/storage
+
+    - name: Build prepare
+      run: |
+        mkdir -p ./output
+        touch config.toml
+        
+
+    - name: Build image - qcow2
+      id: build-image-qcow
+      run: |
+        sudo podman pull ${{ env.IMAGE_NAME }}
+        sudo podman run \
+          --rm \
+          -it \
+          --privileged \
+          --pull=newer \
+          --security-opt label=type:unconfined_t \
+          -v ./config.toml:/config.toml:ro \
+          -v ./output:/output \
+          -v /var/lib/containers/storage:/var/lib/containers/storage \
+          ${{ env.BIB_IMAGE }} \
+          --target-arch ${{ env.ARCH }} \
+          --type qcow2 \
+          --rootfs ${{ env.ROOTFS }} \
+          --local \
+          ${{ env.IMAGE_NAME }}
+
+
+    - name: Set release tag
+      id: get-tag
+      run: |
+        echo "TAG=$(date +'%y%m%d')" >> $GITHUB_OUTPUT
+
+    - name: Wrap disk image in container
+      run: |
+        podman build -t ghcr.io/gbraad-fedora/eln-disk:latest \
+          -f containers/Containerfile-disk .
+
+    - name: Tag image container
+      run: |
+        podman tag ghcr.io/gbraad-fedora/eln-disk:latest \
+          ghcr.io/gbraad-fedora/eln-disk:${{steps.get-tag.outputs.TAG}}
+
+    - name: Login to registry
+      run: |
+        podman login ghcr.io -u ${{ github.actor }} \
+          -p ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Push image container to registry
+      run: |
+        podman push ghcr.io/gbraad-fedora/eln-disk:latest
+        podman push ghcr.io/gbraad-fedora/eln-disk:${{steps.get-tag.outputs.TAG}}
